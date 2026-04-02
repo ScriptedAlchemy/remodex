@@ -9,14 +9,9 @@ import Foundation
 enum CodexOffLANAsyncRuntimeSupport {
     static func isSupported(
         bundleIdentifier: String? = Bundle.main.bundleIdentifier,
-        provisioningProfileText: String? = nil,
-        convexSiteURL: URL? = AppEnvironment.convexSiteURL
+        provisioningProfileText: String? = nil
     ) -> Bool {
-        if CodexConvexAsyncTransport.isConfigured(siteURL: convexSiteURL) {
-            return true
-        }
-
-        return CodexCloudAsyncRuntimeSupport.isSupported(
+        CodexCloudAsyncRuntimeSupport.isSupported(
             bundleIdentifier: bundleIdentifier,
             provisioningProfileText: provisioningProfileText
         )

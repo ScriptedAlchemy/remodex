@@ -8,15 +8,8 @@ import Foundation
 
 enum CodexAsyncTransportFactory {
     static func make(
-        convexSiteURL: URL? = AppEnvironment.convexSiteURL,
-        cloudKitFactory: () -> CodexAsyncRequestTransporting? = { CodexCloudAsyncTransport.makeIfSupported() },
-        convexFactory: (URL) -> CodexAsyncRequestTransporting = { CodexConvexAsyncTransport(siteURL: $0) }
+        cloudKitFactory: () -> CodexAsyncRequestTransporting? = { CodexCloudAsyncTransport.makeIfSupported() }
     ) -> CodexAsyncRequestTransporting? {
-        if CodexConvexAsyncTransport.isConfigured(siteURL: convexSiteURL),
-           let convexSiteURL {
-            return convexFactory(convexSiteURL)
-        }
-
-        return cloudKitFactory()
+        cloudKitFactory()
     }
 }

@@ -24,13 +24,6 @@ private final class StubAsyncRequestTransport: CodexAsyncRequestTransporting {
 }
 
 final class CodexCloudAsyncRuntimeSupportTests: XCTestCase {
-    func testAppEnvironmentConvexSiteURLIsHardcodedDeploymentURL() {
-        XCTAssertEqual(
-            AppEnvironment.convexSiteURL.absoluteString,
-            "https://determined-ladybug-18.convex.site"
-        )
-    }
-
     func testIsSupportedReturnsTrueForICloudContainerEntitlement() {
         let supported = CodexCloudAsyncRuntimeSupport.isSupported(
             provisioningProfileText: """
@@ -132,84 +125,62 @@ final class CodexCloudAsyncRuntimeSupportTests: XCTestCase {
         XCTAssertFalse(supported)
     }
 
-    func testOffLANSupportReturnsTrueWhenConvexSiteURLIsConfigured() {
+    func testOffLANSupportReturnsTrueForCloudKitEntitlement() {
         let supported = CodexOffLANAsyncRuntimeSupport.isSupported(
-            bundleIdentifier: "com.zackkirsh.remodex",
-            provisioningProfileText: nil,
-            convexSiteURL: URL(string: "https://example.convex.site")
+            bundleIdentifier: "com.example.Remodex",
+            provisioningProfileText: """
+            <key>Entitlements</key>
+            <dict>
+                <key>com.apple.developer.icloud-services</key>
+                <array>
+                    <string>CloudKit</string>
+                </array>
+            </dict>
+            """
         )
 
         XCTAssertTrue(supported)
     }
 
-    func testOffLANSupportReturnsTrueForHardcodedConvexDeploymentURL() {
+    func testOffLANSupportReturnsFalseWithoutCloudKitEntitlement() {
         let supported = CodexOffLANAsyncRuntimeSupport.isSupported(
-            bundleIdentifier: "com.zackkirsh.remodex",
-            provisioningProfileText: nil,
-            convexSiteURL: AppEnvironment.convexSiteURL
+            bundleIdentifier: "com.example.Remodex",
+            provisioningProfileText: """
+            <key>Entitlements</key>
+            <dict>
+                <key>get-task-allow</key>
+                <true/>
+            </dict>
+            """
         )
 
-        XCTAssertTrue(supported)
+        XCTAssertFalse(supported)
     }
 
-    func testAsyncTransportFactoryPrefersConvexTransportWhenConfigured() {
-        let spy = AsyncTransportFactorySpy()
-
-        let transport = CodexAsyncTransportFactory.make(
-            convexSiteURL: URL(string: "https://example.convex.site"),
-            cloudKitFactory: spy.cloudKitFactory,
-            convexFactory: spy.convexFactory
-        )
-
-        XCTAssertTrue(transport === spy.fallback)
-        XCTAssertEqual(spy.convexFactoryURLs, [URL(string: "https://example.convex.site")!])
-        XCTAssertFalse(spy.cloudKitFactoryCalled)
-    }
-
-    func testAsyncTransportFactoryFallsBackToCloudKitTransportWhenConvexIsMissing() {
+    func testAsyncTransportFactoryReturnsCloudKitTransportWhenAvailable() {
         let fallback = StubAsyncRequestTransport()
-        var convexFactoryCalled = false
         var cloudKitFactoryCalled = false
         let transport = CodexAsyncTransportFactory.make(
-            convexSiteURL: nil,
             cloudKitFactory: {
                 cloudKitFactoryCalled = true
-                return fallback
-            },
-            convexFactory: { _ in
-                convexFactoryCalled = true
                 return fallback
             }
         )
 
         XCTAssertTrue(transport === fallback)
-        XCTAssertFalse(convexFactoryCalled)
         XCTAssertTrue(cloudKitFactoryCalled)
     }
 
-    func testConvexTransportConfigurationRequiresHTTPURLWithHost() {
-        XCTAssertTrue(CodexConvexAsyncTransport.isConfigured(siteURL: URL(string: "https://example.convex.site")))
-        XCTAssertTrue(CodexConvexAsyncTransport.isConfigured(siteURL: URL(string: "https://example.convex.site/")))
-        XCTAssertFalse(CodexConvexAsyncTransport.isConfigured(siteURL: URL(string: "ftp://example.com")))
-        XCTAssertFalse(CodexConvexAsyncTransport.isConfigured(siteURL: URL(string: "https://example.convex.site/path")))
-        XCTAssertFalse(CodexConvexAsyncTransport.isConfigured(siteURL: URL(string: "https://example.convex.site?foo=bar")))
-        XCTAssertFalse(CodexConvexAsyncTransport.isConfigured(siteURL: URL(string: "https://example.convex.site#fragment")))
-        XCTAssertFalse(CodexConvexAsyncTransport.isConfigured(siteURL: nil))
-    }
-}
+    func testAsyncTransportFactoryReturnsNilWhenCloudKitTransportUnavailable() {
+        var cloudKitFactoryCalled = false
+        let transport = CodexAsyncTransportFactory.make(
+            cloudKitFactory: {
+                cloudKitFactoryCalled = true
+                return nil
+            }
+        )
 
-private final class AsyncTransportFactorySpy {
-    let fallback = StubAsyncRequestTransport()
-    private(set) var convexFactoryURLs: [URL] = []
-    private(set) var cloudKitFactoryCalled = false
-
-    func cloudKitFactory() -> CodexAsyncRequestTransporting? {
-        cloudKitFactoryCalled = true
-        return fallback
-    }
-
-    func convexFactory(_ url: URL) -> CodexAsyncRequestTransporting {
-        convexFactoryURLs.append(url)
-        return fallback
+        XCTAssertNil(transport)
+        XCTAssertTrue(cloudKitFactoryCalled)
     }
 }
