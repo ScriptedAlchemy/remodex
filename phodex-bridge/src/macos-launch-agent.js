@@ -33,9 +33,12 @@ const DEFAULT_PAIRING_WAIT_TIMEOUT_MS = 10_000;
 const DEFAULT_PAIRING_WAIT_INTERVAL_MS = 200;
 
 // Runs the bridge inside launchd while keeping QR rendering in the foreground CLI command.
-function runMacOSBridgeService({ env = process.env } = {}) {
+function runMacOSBridgeService({
+  env = process.env,
+  startBridgeImpl = startBridge,
+} = {}) {
   assertDarwinPlatform();
-  const config = readDaemonConfig({ env });
+  const config = stripLegacyConvexConfig(readDaemonConfig({ env }));
   if (!config?.relayUrl) {
     const message = "No relay URL configured for the macOS bridge service.";
     // Clear any stale QR so the CLI does not keep showing a pairing payload for a dead service.
@@ -50,7 +53,7 @@ function runMacOSBridgeService({ env = process.env } = {}) {
     return;
   }
 
-  startBridge({
+  startBridgeImpl({
     config,
     printPairingQr: false,
     onPairingPayload(pairingPayload) {
@@ -60,6 +63,15 @@ function runMacOSBridgeService({ env = process.env } = {}) {
       writeBridgeStatus(status, { env });
     },
   });
+}
+
+function stripLegacyConvexConfig(config) {
+  if (!config || typeof config !== "object") {
+    return config;
+  }
+
+  const { convexSiteUrl: _legacyConvexSiteUrl, ...nextConfig } = config;
+  return nextConfig;
 }
 
 // Prepares config + launchd state and optionally waits for the fresh pairing payload written by the service.
@@ -80,7 +92,7 @@ async function startMacOSBridgeService({
   assertRelayConfigured(config);
   const startedAt = Date.now();
 
-  writeDaemonConfig(config, { env, fsImpl });
+  writeDaemonConfig(stripLegacyConvexConfig(config), { env, fsImpl });
   clearPairingSession({ env, fsImpl });
   clearBridgeStatus({ env, fsImpl });
   ensureRemodexStateDir({ env, fsImpl, osImpl });

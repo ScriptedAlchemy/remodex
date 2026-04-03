@@ -15,9 +15,11 @@ const {
   resetMacOSBridgePairing,
   resolveLaunchAgentPlistPath,
   runMacOSBridgeService,
+  startMacOSBridgeService,
   stopMacOSBridgeService,
 } = require("../src/macos-launch-agent");
 const {
+  readDaemonConfig,
   writeDaemonConfig,
   readBridgeStatus,
   readPairingSession,
@@ -152,6 +154,76 @@ test("runMacOSBridgeService records a clean error state instead of throwing when
     assert.equal(status?.lastError, "No relay URL configured for the macOS bridge service.");
     assert.equal(typeof status?.updatedAt, "string");
   });
+});
+
+test("runMacOSBridgeService strips legacy Convex config before starting the bridge", () => {
+  withTempDaemonEnv(() => {
+    writeDaemonConfig({
+      relayUrl: "ws://127.0.0.1:9100/relay",
+      convexSiteUrl: "https://stale.convex.site",
+      refreshEnabled: true,
+    });
+
+    let startedConfig = null;
+    runMacOSBridgeService({
+      env: process.env,
+      startBridgeImpl({ config }) {
+        startedConfig = config;
+      },
+    });
+
+    assert.equal(startedConfig?.relayUrl, "ws://127.0.0.1:9100/relay");
+    assert.equal(startedConfig?.refreshEnabled, true);
+    assert.ok(!("convexSiteUrl" in startedConfig));
+  });
+});
+
+test("startMacOSBridgeService strips legacy Convex config before persisting daemon state", async () => {
+  const previousDir = process.env.REMODEX_DEVICE_STATE_DIR;
+  const previousHome = process.env.HOME;
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-launch-agent-"));
+  const daemonEnv = {
+    HOME: rootDir,
+    REMODEX_DEVICE_STATE_DIR: rootDir,
+  };
+  process.env.REMODEX_DEVICE_STATE_DIR = rootDir;
+  process.env.HOME = rootDir;
+
+  try {
+    await startMacOSBridgeService({
+      env: {
+        ...daemonEnv,
+        REMODEX_RELAY: "ws://127.0.0.1:9100/relay",
+        REMODEX_REFRESH_ENABLED: "true",
+        REMODEX_CONVEX_SITE_URL: "https://stale.convex.site",
+      },
+      platform: "darwin",
+      fsImpl: fs,
+      osImpl: {
+        homedir: () => rootDir,
+      },
+      execFileSyncImpl() {
+        return "";
+      },
+    });
+
+    const savedConfig = readDaemonConfig({ env: daemonEnv });
+    assert.equal(savedConfig?.relayUrl, "ws://127.0.0.1:9100/relay");
+    assert.equal(savedConfig?.refreshEnabled, true);
+    assert.ok(!("convexSiteUrl" in savedConfig));
+  } finally {
+    if (previousDir === undefined) {
+      delete process.env.REMODEX_DEVICE_STATE_DIR;
+    } else {
+      process.env.REMODEX_DEVICE_STATE_DIR = previousDir;
+    }
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 test("getMacOSBridgeServiceStatus reports launchd + runtime metadata together", () => {
