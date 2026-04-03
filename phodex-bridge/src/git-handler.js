@@ -321,7 +321,7 @@ async function gitCheckout(cwd, params) {
         "Cannot switch branches: you have uncommitted changes."
       );
     }
-    if (err.message?.includes("already used by worktree")) {
+    if (err.message?.includes("already used by worktree") || err.message?.includes("already checked out at")) {
       throw gitError(
         "checkout_branch_in_other_worktree",
         "Cannot switch branches: this branch is already open in another worktree."
