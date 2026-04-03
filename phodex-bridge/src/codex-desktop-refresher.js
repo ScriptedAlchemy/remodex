@@ -571,6 +571,9 @@ function readBridgeConfig({
       readFirstDefinedEnv(["REMODEX_REFRESH_DEBOUNCE_MS"], String(DEFAULT_DEBOUNCE_MS), env),
       DEFAULT_DEBOUNCE_MS
     ),
+    cloudAsyncEnabled: true,
+    cloudAsyncHelperPath: readFirstDefinedEnv(["REMODEX_ICLOUD_HELPER_PATH"], "", env),
+    cloudAsyncContainerId: readFirstDefinedEnv(["REMODEX_ICLOUD_CONTAINER"], "", env),
     codexEndpoint,
     refreshCommand,
     codexBundleId: readFirstDefinedEnv(["REMODEX_CODEX_BUNDLE_ID"], DEFAULT_BUNDLE_ID, env),

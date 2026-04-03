@@ -17,18 +17,14 @@ const { createCodexTransport } = require("./codex-transport");
 const { createThreadRolloutActivityWatcher } = require("./rollout-watch");
 const { printQR } = require("./qr");
 const { rememberActiveThread } = require("./session-state");
-const { handleDesktopRequest } = require("./desktop-handler");
-const { handleGitRequest } = require("./git-handler");
-const { handleThreadContextRequest } = require("./thread-context-handler");
-const { handleWorkspaceRequest } = require("./workspace-handler");
 const { createNotificationsHandler } = require("./notifications-handler");
-const { createVoiceHandler, resolveVoiceAuth } = require("./voice-handler");
-const {
-  composeSanitizedAuthStatusFromSettledResults,
-} = require("./account-status");
+const { createVoiceHandler } = require("./voice-handler");
 const { createBridgePackageVersionStatusReader } = require("./package-version-status");
 const { createPushNotificationServiceClient } = require("./push-notification-service-client");
 const { createPushNotificationTracker } = require("./push-notification-tracker");
+const { createAsyncHelperClient } = require("./async-helper-factory");
+const { createApplicationRouter } = require("./application-router");
+const { handleBridgeManagedHandshakeMessage, createBridgeManagedAccountHandler } = require("./bridge-managed-handlers");
 const {
   loadOrCreateBridgeDeviceState,
   resolveBridgeRelaySession,
@@ -89,6 +85,21 @@ function startBridge({
     pushServiceClient,
     previewMaxChars: config.pushPreviewMaxChars,
   });
+  const asyncHelperClient = createAsyncHelperClient({
+    config,
+    helperPath: config.cloudAsyncHelperPath,
+    containerId: config.cloudAsyncContainerId,
+    deviceStateDir: process.env.REMODEX_DEVICE_STATE_DIR || "",
+    logPrefix: "[remodex]",
+    onAsyncRequest(message) {
+      handleAsyncHelperRequest(message);
+    },
+    onStatusChange() {
+      if (lastPublishedBridgeStatus) {
+        publishBridgeStatus(lastPublishedBridgeStatus);
+      }
+    },
+  });
   const readBridgePackageVersionStatus = createBridgePackageVersionStatusReader();
 
   // Keep the local Codex runtime alive across transient relay disconnects.
@@ -104,6 +115,7 @@ function startBridge({
   let codexHandshakeState = config.codexEndpoint ? "warm" : "cold";
   const forwardedInitializeRequestIds = new Set();
   const bridgeManagedCodexRequestWaiters = new Map();
+  const asyncResponseRouter = createAsyncResponseRouter();
   const forwardedRequestMethodsById = new Map();
   const relaySanitizedResponseMethodsById = new Map();
   const trackedForwardedRequestMethods = new Set([
@@ -167,6 +179,7 @@ function startBridge({
     pid: process.pid,
     lastError: "",
   });
+  asyncHelperClient.start();
 
   codex.onError((error) => {
     publishBridgeStatus({
@@ -395,6 +408,9 @@ function startBridge({
     if (handleBridgeManagedCodexResponse(message)) {
       return;
     }
+    if (asyncResponseRouter.routeResponse(message)) {
+      return;
+    }
     updatePendingAuthLoginFromCodexMessage(message);
     trackCodexHandshakeState(message);
     desktopRefresher.handleOutbound(message);
@@ -423,6 +439,8 @@ function startBridge({
     desktopRefresher.handleTransportReset();
     failBridgeManagedCodexRequests(new Error("Codex transport closed before the bridge request completed."));
     forwardedRequestMethodsById.clear();
+    asyncResponseRouter.clear();
+    asyncHelperClient.stop();
     if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
       socket.close();
     }
@@ -433,184 +451,72 @@ function startBridge({
     clearReconnectTimer();
     clearRelayWatchdog();
     clearBridgeStatusHeartbeat();
+    asyncHelperClient.stop();
   }));
   process.on("SIGTERM", () => shutdown(codex, () => socket, () => {
     isShuttingDown = true;
     clearReconnectTimer();
     clearRelayWatchdog();
     clearBridgeStatusHeartbeat();
+    asyncHelperClient.stop();
   }));
 
-  // Routes decrypted app payloads through the same bridge handlers as before.
-  function handleApplicationMessage(rawMessage) {
-    if (handleBridgeManagedHandshakeMessage(rawMessage)) {
-      return;
-    }
-    if (handleBridgeManagedAccountRequest(rawMessage, sendApplicationResponse)) {
-      return;
-    }
-    if (voiceHandler.handleVoiceRequest(rawMessage, sendApplicationResponse)) {
-      return;
-    }
-    if (handleThreadContextRequest(rawMessage, sendApplicationResponse)) {
-      return;
-    }
-    if (handleWorkspaceRequest(rawMessage, sendApplicationResponse)) {
-      return;
-    }
-    if (notificationsHandler.handleNotificationsRequest(rawMessage, sendApplicationResponse)) {
-      return;
-    }
-    if (handleDesktopRequest(rawMessage, sendApplicationResponse, {
-      bundleId: config.codexBundleId,
-      appPath: config.codexAppPath,
-    })) {
-      return;
-    }
-    if (handleGitRequest(rawMessage, sendApplicationResponse)) {
-      return;
-    }
-    desktopRefresher.handleInbound(rawMessage);
-    rolloutLiveMirror?.observeInbound(rawMessage);
-    rememberForwardedRequestMethod(rawMessage);
-    rememberThreadFromMessage("phone", rawMessage);
-    codex.send(rawMessage);
-  }
-
-  // Encrypts bridge-generated responses instead of letting the relay see plaintext.
   function sendApplicationResponse(rawMessage) {
     secureTransport.queueOutboundApplicationMessage(rawMessage, sendRelayWireMessage);
   }
 
-  // ─── Bridge-owned auth snapshot ─────────────────────────────
+  const { handleBridgeManagedAccountRequest } = createBridgeManagedAccountHandler({
+    sendCodexRequest,
+    readBridgePackageVersionStatus,
+    getPendingAuthLogin: () => pendingAuthLogin,
+  });
 
-  // Handles the bridge-owned auth status wrappers without exposing tokens to the phone.
-  // This dispatcher stays synchronous so non-account messages can continue down the normal routing chain.
-  function handleBridgeManagedAccountRequest(rawMessage, sendResponse) {
-    let parsed = null;
+  const handleApplicationMessage = createApplicationRouter({
+    config,
+    codex,
+    voiceHandler,
+    notificationsHandler,
+    desktopRefresher,
+    rolloutLiveMirror,
+    handleBridgeManagedHandshakeMessage,
+    handleBridgeManagedAccountRequest,
+    rememberForwardedRequestMethod,
+    rememberThreadFromMessage,
+    prepareCodexRequest: asyncResponseRouter.prepareRequest,
+    getHandshakeState: () => codexHandshakeState,
+    forwardedInitializeRequestIds,
+    defaultResponseSender: sendApplicationResponse,
+  });
+
+  function handleAsyncHelperRequest(message) {
+    const rawMessage = readString(message?.payloadText);
+    const recordName = readString(message?.recordName);
+    const requestId = readString(message?.requestId);
+    if (!rawMessage || !recordName) {
+      return;
+    }
     try {
-      parsed = JSON.parse(rawMessage);
-    } catch {
-      return false;
-    }
-
-    const method = typeof parsed?.method === "string" ? parsed.method.trim() : "";
-    if (method !== "account/status/read"
-      && method !== "getAuthStatus"
-      && method !== "account/login/openOnMac"
-      && method !== "voice/resolveAuth") {
-      return false;
-    }
-
-    const requestId = parsed.id;
-    const shouldRespond = requestId != null;
-    readBridgeManagedAccountResult(method, parsed.params || {})
-      .then((result) => {
-        if (shouldRespond) {
-          sendResponse(JSON.stringify({ id: requestId, result }));
-        }
-      })
-      .catch((error) => {
-        if (shouldRespond) {
-          sendResponse(createJsonRpcErrorResponse(requestId, error, "auth_status_failed"));
-        }
+      handleApplicationMessage(rawMessage, (payloadText) => {
+        asyncHelperClient.sendResponse({
+          recordName,
+          requestId,
+          payloadText,
+        });
       });
-
-    return true;
-  }
-
-  // Resolves bridge-owned account helpers like status reads and Mac-side browser opening.
-  async function readBridgeManagedAccountResult(method, params) {
-    switch (method) {
-      case "account/status/read":
-      case "getAuthStatus":
-        return readSanitizedAuthStatus();
-      case "account/login/openOnMac":
-        return openPendingAuthLoginOnMac(params);
-      case "voice/resolveAuth":
-        return resolveVoiceAuth(sendCodexRequest);
-      default:
-        throw new Error(`Unsupported bridge-managed account method: ${method}`);
+      if (!requestId) {
+        asyncHelperClient.sendResponse({
+          recordName,
+          requestId: "",
+          payloadText: "",
+        });
+      }
+    } catch (error) {
+      asyncHelperClient.sendError({
+        recordName,
+        requestId,
+        message: (error && error.message) || "Bridge request failed.",
+      });
     }
-  }
-
-  // Combines account/read + getAuthStatus into one safe snapshot for the phone UI.
-  // The two RPCs are settled independently so one transient failure does not hide the other.
-  async function readSanitizedAuthStatus() {
-    const [accountReadResult, authStatusResult, bridgeVersionInfoResult] = await Promise.allSettled([
-      sendCodexRequest("account/read", {
-        refreshToken: false,
-      }),
-      sendCodexRequest("getAuthStatus", {
-        includeToken: true,
-        refreshToken: true,
-      }),
-      readBridgePackageVersionStatus(),
-    ]);
-
-    return composeSanitizedAuthStatusFromSettledResults({
-      accountReadResult: accountReadResult.status === "fulfilled"
-        ? {
-          status: "fulfilled",
-          value: normalizeAccountRead(accountReadResult.value),
-        }
-        : accountReadResult,
-      authStatusResult,
-      loginInFlight: Boolean(pendingAuthLogin.loginId),
-      bridgeVersionInfo: bridgeVersionInfoResult.status === "fulfilled"
-        ? bridgeVersionInfoResult.value
-        : null,
-      transportMode: codex.mode,
-    });
-  }
-
-  // Opens the ChatGPT sign-in URL in the default browser on the bridge Mac.
-  async function openPendingAuthLoginOnMac(params) {
-    if (process.platform !== "darwin") {
-      const error = new Error("Opening ChatGPT sign-in on the bridge is only supported on macOS.");
-      error.errorCode = "unsupported_platform";
-      throw error;
-    }
-
-    const authUrl = readString(params?.authUrl) || pendingAuthLogin.authUrl;
-    if (!authUrl) {
-      const error = new Error("No pending ChatGPT sign-in URL is available on this bridge.");
-      error.errorCode = "missing_auth_url";
-      throw error;
-    }
-
-    await execFileAsync("open", [authUrl], { timeout: 15_000 });
-    return {
-      success: true,
-      openedOnMac: true,
-    };
-  }
-
-  function normalizeAccountRead(payload) {
-    if (!payload || typeof payload !== "object") {
-      return {
-        account: null,
-        requiresOpenaiAuth: true,
-      };
-    }
-
-    return {
-      account: payload.account && typeof payload.account === "object" ? payload.account : null,
-      requiresOpenaiAuth: Boolean(payload.requiresOpenaiAuth),
-    };
-  }
-
-  function createJsonRpcErrorResponse(requestId, error, defaultErrorCode) {
-    return JSON.stringify({
-      id: requestId,
-      error: {
-        code: -32000,
-        message: error?.userMessage || error?.message || "Bridge request failed.",
-        data: {
-          errorCode: error?.errorCode || defaultErrorCode,
-        },
-      },
-    });
   }
 
   function rememberForwardedRequestMethod(rawMessage) {
@@ -799,44 +705,6 @@ function startBridge({
     }));
   }
 
-  // The spawned/shared Codex app-server stays warm across phone reconnects.
-  // When iPhone reconnects it sends initialize again, but forwarding that to the
-  // already-initialized Codex transport only produces "Already initialized".
-  function handleBridgeManagedHandshakeMessage(rawMessage) {
-    let parsed = null;
-    try {
-      parsed = JSON.parse(rawMessage);
-    } catch {
-      return false;
-    }
-
-    const method = typeof parsed?.method === "string" ? parsed.method.trim() : "";
-    if (!method) {
-      return false;
-    }
-
-    if (method === "initialize" && parsed.id != null) {
-      if (codexHandshakeState !== "warm") {
-        forwardedInitializeRequestIds.add(String(parsed.id));
-        return false;
-      }
-
-      sendApplicationResponse(JSON.stringify({
-        id: parsed.id,
-        result: {
-          bridgeManaged: true,
-        },
-      }));
-      return true;
-    }
-
-    if (method === "initialized") {
-      return codexHandshakeState === "warm";
-    }
-
-    return false;
-  }
-
   // Learns whether the underlying Codex transport has already completed its own MCP handshake.
   function trackCodexHandshakeState(rawMessage) {
     let parsed = null;
@@ -947,9 +815,14 @@ function startBridge({
     bridgeManagedCodexRequestWaiters.clear();
   }
 
+
   function publishBridgeStatus(status) {
-    lastPublishedBridgeStatus = status;
-    onBridgeStatus?.(status);
+    const nextStatus = {
+      ...status,
+      helperStatus: asyncHelperClient.currentStatus(),
+    };
+    lastPublishedBridgeStatus = nextStatus;
+    onBridgeStatus?.(nextStatus);
   }
 
   // Refreshes the relay's trusted-mac index after the QR bootstrap locks in a phone identity.
@@ -1209,6 +1082,65 @@ function parseBridgeJSON(value) {
   }
 }
 
+function createAsyncResponseRouter({ createRequestId = () => `async-helper:${randomBytes(12).toString("hex")}` } = {}) {
+  const responseRoutesByCodexRequestId = new Map();
+
+  function prepareRequest(rawMessage, responseSender, defaultResponseSender) {
+    if (responseSender === defaultResponseSender) {
+      return rawMessage;
+    }
+
+    const parsed = parseBridgeJSON(rawMessage);
+    const requestId = parsed?.id;
+    const method = typeof parsed?.method === "string" ? parsed.method.trim() : "";
+    if (!method || requestId == null || typeof responseSender !== "function") {
+      return rawMessage;
+    }
+
+    const originalRequestId = String(requestId);
+    const codexRequestId = createRequestId();
+    responseRoutesByCodexRequestId.set(codexRequestId, {
+      responseSender,
+      originalRequestId,
+    });
+
+    return JSON.stringify({
+      ...parsed,
+      id: codexRequestId,
+    });
+  }
+
+  function routeResponse(rawMessage) {
+    const parsed = parseBridgeJSON(rawMessage);
+    const responseId = parsed?.id;
+    if (responseId == null) {
+      return false;
+    }
+
+    const route = responseRoutesByCodexRequestId.get(String(responseId));
+    if (!route || typeof route.responseSender !== "function") {
+      return false;
+    }
+
+    responseRoutesByCodexRequestId.delete(String(responseId));
+    route.responseSender(JSON.stringify({
+      ...parsed,
+      id: route.originalRequestId,
+    }));
+    return true;
+  }
+
+  function clear() {
+    responseRoutesByCodexRequestId.clear();
+  }
+
+  return {
+    clear,
+    prepareRequest,
+    routeResponse,
+  };
+}
+
 // Treats silent relay sockets as stale so the daemon can self-heal after sleep/wake.
 function hasRelayConnectionGoneStale(
   lastActivityAt,
@@ -1253,6 +1185,7 @@ function buildHeartbeatBridgeStatus(
 
 module.exports = {
   buildHeartbeatBridgeStatus,
+  createAsyncResponseRouter,
   hasRelayConnectionGoneStale,
   sanitizeThreadHistoryImagesForRelay,
   startBridge,

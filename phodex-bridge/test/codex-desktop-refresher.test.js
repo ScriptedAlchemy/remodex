@@ -96,11 +96,19 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
   assert.equal(macConfig.refreshEnabled, false);
   assert.equal(macConfig.relayUrl, "");
   assert.equal(macConfig.pushServiceUrl, "");
+  assert.equal(macConfig.cloudAsyncEnabled, true);
+  assert.equal(macConfig.cloudAsyncHelperPath, "");
+  assert.equal(macConfig.cloudAsyncContainerId, "");
   assert.equal(macEndpointConfig.refreshEnabled, false);
+  assert.equal(macEndpointConfig.cloudAsyncEnabled, true);
   assert.equal(linuxConfig.refreshEnabled, false);
+  assert.equal(linuxConfig.cloudAsyncEnabled, true);
   assert.equal(linuxCommandConfig.refreshEnabled, false);
+  assert.equal(linuxCommandConfig.cloudAsyncEnabled, true);
   assert.equal(explicitOnConfig.refreshEnabled, true);
+  assert.equal(explicitOnConfig.cloudAsyncEnabled, true);
   assert.equal(explicitOffConfig.refreshEnabled, false);
+  assert.equal(explicitOffConfig.cloudAsyncEnabled, true);
 });
 
 test("readBridgeConfig uses only the packaged relay default outside a source checkout", () => {
@@ -121,6 +129,7 @@ test("readBridgeConfig uses only the packaged relay default outside a source che
 
   assert.equal(config.relayUrl, "wss://relay.example/relay");
   assert.equal(config.pushServiceUrl, "");
+  assert.equal(config.cloudAsyncEnabled, true);
 });
 
 test("readBridgeConfig uses a packaged push default only when it is explicitly provided", () => {
@@ -144,6 +153,7 @@ test("readBridgeConfig uses a packaged push default only when it is explicitly p
 
   assert.equal(config.relayUrl, "wss://relay.example/relay");
   assert.equal(config.pushServiceUrl, "https://relay.example");
+  assert.equal(config.cloudAsyncEnabled, true);
 });
 
 test("readBridgeConfig does not use the hosted fallback inside a source checkout", () => {
@@ -159,6 +169,7 @@ test("readBridgeConfig does not use the hosted fallback inside a source checkout
 
   assert.equal(config.relayUrl, "");
   assert.equal(config.pushServiceUrl, "");
+  assert.equal(config.cloudAsyncEnabled, true);
 });
 
 test("readBridgeConfig preserves reverse-proxy subpaths when deriving push URLs", () => {
@@ -175,6 +186,7 @@ test("readBridgeConfig preserves reverse-proxy subpaths when deriving push URLs"
   });
 
   assert.equal(config.pushServiceUrl, "https://relay.example/remodex");
+  assert.equal(config.cloudAsyncEnabled, true);
 });
 
 test("readBridgeConfig disables managed push defaults when a self-hosted relay override is set", () => {
@@ -197,6 +209,7 @@ test("readBridgeConfig disables managed push defaults when a self-hosted relay o
 
   assert.equal(config.relayUrl, "wss://self-host.example/relay");
   assert.equal(config.pushServiceUrl, "");
+  assert.equal(config.cloudAsyncEnabled, true);
 });
 
 test("thread/start falls back once to the new-thread route when thread id is still unknown", async () => {
